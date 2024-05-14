@@ -1,0 +1,2 @@
+,N and C,SAT Percentage,Average Percentage of SAT Clauses,Average Percent Hamming distance,Average Runtime,Average Percent Dont Care,Average Number of Iterations,Average number of absent literals,SAT Percentage (MV),Average Percentage of SAT Clauses(MV),Average Percent Hamming distance (MV),Average Number of Contradictions (WP)
+0,"(5, 20)",0.0,88.6,80.0,0.00030089470833333335,0.2,2.0,0.0,0.0,83.25,100.0,0.0

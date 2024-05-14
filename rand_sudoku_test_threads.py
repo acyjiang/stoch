@@ -12,8 +12,6 @@ import time
 import sys
 import threading
 
-
-sys.path.insert(0, "C:\\Users\\hcohe\\Desktop\\codes\\SurveyProp-ver3")
 from SurveyProp_classes import *
 
 global_lock_f1 = threading.Lock()
@@ -23,7 +21,7 @@ T = 20  # number of rounds
 res_dict = {}
 res_per_itration_dict = {}
 
-class_type = randomKSAT
+class_type = sudokuKSAT
 
 
 def calc_hamming(vec1, vec2):
@@ -43,12 +41,34 @@ def absentLiteralCounter(lit_dict):
     return counter
 
 
-def SAT_test(n, c, test_it, algorithm, class_type):
+def create_sudoku(n):
+    if int(np.sqrt(n)) ** 2 != n:
+        raise ValueError("n must be a perfect square")
+
+    def pattern(r, c):
+        return (
+            n // int(np.sqrt(n)) * (r % int(np.sqrt(n))) + r // int(np.sqrt(n)) + c
+        ) % n
+
+    def shuffle(s):
+        return np.random.permutation(s)
+
+    r_base = range(int(np.sqrt(n)))
+    rows = [g * int(np.sqrt(n)) + r for g in shuffle(r_base) for r in shuffle(r_base)]
+    cols = [g * int(np.sqrt(n)) + c for g in shuffle(r_base) for c in shuffle(r_base)]
+    nums = shuffle(range(1, n + 1))
+
+    board = np.array([[nums[pattern(r, c)] for c in cols] for r in rows])
+
+    return board
+
+
+def SUDOKU_test(n, c, test_it, algorithm, class_type):
+
+    board_size = n
 
     global T
     max_iters = 1000
-    k = 3  # number of literals per clause
-    m = int(np.ceil(n * c))
 
     res_arr = np.zeros(11)
     res_arr_per_iteration = np.zeros(11)
@@ -59,7 +79,16 @@ def SAT_test(n, c, test_it, algorithm, class_type):
                 n, c, test_it, i
             )
         )
-        prop = class_type(n, m, k, max_iters)
+
+        sudoku_board = create_sudoku(n)
+        # choose c cells using indices from 0 to n ** 2 to set as filled
+        chosen_cells = np.random.choice(n**2, c, replace=False)
+        chosen_values = sudoku_board.flatten()[chosen_cells]
+        fixed_cells = {}
+        for i in range(len(chosen_values)):
+            fixed_cells[chosen_cells[i]] = chosen_values[i] - 1
+
+        prop = sudokuKSAT(board_size, fixed_cells, max_iters)
 
         start = time.process_time()
 
@@ -71,7 +100,7 @@ def SAT_test(n, c, test_it, algorithm, class_type):
             # res_arr += test_results(prop,start)
         elif algorithm == "SP":
             prop.surveyID()
-            # res_arr += test_results(prop,start)
+            res_arr += test_results(prop, start)
 
         res_arr_per_iteration = test_results(prop, start)
         res_arr += res_arr_per_iteration  # test_results(prop,start)
@@ -113,12 +142,9 @@ def test_results(prop, start):
     # assign dont cares with random values and check the validity of the literals assignmnet again
     for i in range(len(prop.assignment)):
         if prop.assignment.astype(int)[i] == 0:
-            prop.assignment.astype(int)[i] = np.random.choice([-1, 1], 1, p=[0.5, 0.5])[
-                0
-            ]
+            prop.assignment.astype(int)[i] = np.random.choice([-1, 1], 1, p=[0.5, 0.5])
     lit_dict, result_val = prop.validateFinalAssignmemt()
 
-    print(result_val)
     # calculate run time
     runtime = runtime + (time.process_time() - start)
 
@@ -138,7 +164,6 @@ def test_results(prop, start):
     majorityVote_hamming_distnace += calc_hamming(
         prop.literal_assignment, prop.majority_vote_result.astype(int)
     )
-    print(prop.literal_assignment)
 
     WP_contradiction_counter = prop.wp_contradiction_counter
 
@@ -161,7 +186,7 @@ def test_results(prop, start):
 
 def test_flow(n, c, test_it, algorithm):
     # res_arr = []
-    res_arr = SAT_test(n, c, test_it, algorithm, class_type)  # randomKSAT
+    res_arr = SUDOKU_test(n, c, test_it, algorithm, class_type)  # randomKSAT
     accumulate_results(n, c, res_arr, algorithm)
 
 
@@ -316,7 +341,7 @@ def main(n, algorithm):
     )
 
     n = int(n)
-    c = [20]
+    c = [4]  # ,15,20,25]#,30,40]
     thread_list = []
     thread_ratio = T // 10
 

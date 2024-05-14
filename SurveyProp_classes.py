@@ -16,43 +16,71 @@ import math
 import pandas as pd
 
 
-
-#import matplotlib.pyplot as plt
-#from tqdm import tqdm
+# import matplotlib.pyplot as plt
+# from tqdm import tqdm
 
 mainVars = {}
 
-class randomKSAT(object):
-    
-    def __init__(self, N, M, K, max_iter, eps=1e-3, rand_assignment = False, verbose=False):
-        super(randomKSAT, self)
-        
-        # General features
-        self.N = N
-        self.M = M
-        self.K = K
+
+class sudokuKSAT(object):
+
+    def __init__(
+        self,
+        board_size,
+        fixed_cells,
+        max_iter,
+        eps=1e-3,
+        rand_assignment=False,
+        verbose=False,
+    ):
+        super(sudokuKSAT, self)
+        ### The grid is board_size by board_size, and each cell has board_size variables that it corresponds to
+        ### For example, the top left cell has a variable denoting whether or not that cell equals each of 1, 2, ... board_size
+        self.board_size = board_size
+        self.fixed_cells = fixed_cells
+        self.N = board_size**3  ## row, column, and number
+        self.num_cell_clauses = (
+            board_size * board_size * (board_size * (board_size - 1) / 2 + 1)
+        )  # each cell has exactly one number
+        self.num_rows_clauses = (
+            board_size * board_size
+        )  # each row has each number exactly once
+        self.num_cols_clauses = (
+            board_size * board_size
+        )  # each column has each number exactly once
+        self.num_block_clauses = (
+            board_size * board_size
+        )  # each block has each number exactly once
+        self.num_fixed_clauses = len(fixed_cells)
+        self.M = (
+            self.num_cell_clauses
+            + self.num_rows_clauses
+            + self.num_cols_clauses
+            + self.num_block_clauses
+            + self.num_fixed_clauses
+        )
+        self.K = board_size  # number of literals in each clause
         self.max_iter = max_iter
         self.eps = eps
         self.rand_assignment = rand_assignment
         self.verbose = verbose
-        
-        #Array of literals per clause for result validation
+
+        # Array of literals per clause for result validation
         self.literals_per_caluse = []
-        #Array that tells us if a literal is True or False in a clause
+        # Array that tells us if a literal is True or False in a clause
         self.literals_per_caluse_T_or_F = []
-        
+
         self.majority_vote_dictionary = self.initializeDictionary()
-        
+
         self.warnings_dictionary = self.initializeDictionary()
-        
-        
+
         self.num_of_additional_clauses_for_anomaly = 0
-        
+
         self.graph = self.initialize_graph()
         self.dgraph = self.graph.copy()
-        
+
         self.majority_vote_result = self.MajorityVoteSolver()
-        
+
         self.WPstatus = None
         self.SPstatus = None
         self.sat = None
@@ -62,113 +90,258 @@ class randomKSAT(object):
         self.U = np.zeros((self.N, 2))
         # for survey propagation
         self.W = np.zeros((self.N, 3))
-        
+
         self.iteration_counter = 0
         self.num_of_SAT_clauses = self.M
         self.SAT_validation = None
-        
+
         self.num_of_SAT_clauses_majority = self.M
         self.SAT_validation_majority = None
         self.majorityVoteValidation()
 
         self.wp_contradiction_counter = 0
-        
+
         self.literal_assignment = np.zeros(self.N)
-        
-        
-        
-        
-        if(self.rand_assignment == False):
+
+        if self.rand_assignment == False:
             self.assignment = np.zeros(self.N)
         else:
-            self.assignment = np.random.choice([-1,1], size=self.N, p=[0.5, 0.5])
-                        
-        
-        if(self.verbose):
+            self.assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+
+        if self.verbose:
             print(self.dgraph.edges())
 
-        
+    def initialize_graph(self):
+        G = nx.Graph()
+        G.add_nodes_from(np.arange(self.N + self.M))
 
-    
-    
-    
+        ### All the cell clauses ###
+        for t in range(self.board_size**2):
+            B = np.arange(
+                t * self.board_size, (t + 1) * self.board_size
+            )  # all the literals corresponding to the cell
+
+            # for each pair of vertices in B, they cannot both be true
+            for i in range(len(B)):
+                for j in range(i + 1, len(B)):
+                    self.literals_per_caluse.append([B[i], B[j]])
+                    J = np.array([-1, -1])
+                    self.literals_per_caluse_T_or_F.append(J.tolist())
+                    G.add_edges_from([(B[i], self.N + t), (B[j], self.N + t)])
+                    self.countLiteralInClause([B[i], B[j]], J)
+                    for k in range(2):
+                        G[B[k]][self.N + t]["J"] = J[k]
+                        G[B[k]][self.N + t]["u"] = np.random.binomial(1, 0.5)
+                        G[B[k]][self.N + t]["h"] = 0
+                        G[B[k]][self.N + t]["delta"] = np.random.rand(1)
+
+            # at least one of them must be true
+            self.literals_per_caluse.append(B.tolist())
+            J = np.ones(self.board_size)  # cell must have exactly one number
+            self.literals_per_caluse_T_or_F.append(J.tolist())
+
+            G.add_edges_from([(x, self.N + t) for x in B])
+            self.countLiteralInClause(B, J)
+
+            for i in range(len(B)):
+                G[B[i]][self.N + t]["J"] = J[i]
+                G[B[i]][self.N + t]["u"] = np.random.binomial(1, 0.5)
+                G[B[i]][self.N + t]["h"] = 0
+                G[B[i]][self.N + t]["delta"] = np.random.rand(1)
+
+        ### All the row clauses ###
+        for t in range(self.board_size):  # for each row
+            for i in range(self.board_size):  # for each number
+                B = np.arange(
+                    t * self.board_size**2 + i, self.N, self.board_size
+                )  # all the literals corresponding to the row
+
+                # at least one of them must be true
+                self.literals_per_caluse.append(B.tolist())
+                J = np.ones(B.shape[0])
+                self.literals_per_caluse_T_or_F.append(J.tolist())
+
+                clause_number = self.N + self.num_cell_clauses + t * self.board_size + i
+                G.add_edges_from([(x, clause_number) for x in B])
+                self.countLiteralInClause(B, J)
+
+                for i in range(len(B)):
+                    G[B[i]][clause_number]["J"] = J[i]
+                    G[B[i]][clause_number]["u"] = np.random.binomial(1, 0.5)
+                    G[B[i]][clause_number]["h"] = 0
+                    G[B[i]][clause_number]["delta"] = np.random.rand(1)
+
+        ### All the column clauses ###
+        for t in range(self.board_size):  # for each column
+            for i in range(self.board_size):  # for each number
+                B = np.arange(
+                    t * self.board_size + i, self.N, self.board_size**2
+                )  # all the literals corresponding to the column
+
+                # at least one of them must be true
+                self.literals_per_caluse.append(B.tolist())
+                J = np.ones(B.shape[0])
+                self.literals_per_caluse_T_or_F.append(J.tolist())
+
+                clause_number = (
+                    self.N
+                    + self.num_cell_clauses
+                    + self.num_rows_clauses
+                    + t * self.board_size
+                    + i
+                )
+                G.add_edges_from([(x, clause_number) for x in B])
+                self.countLiteralInClause(B, J)
+
+                for i in range(len(B)):
+                    G[B[i]][clause_number]["J"] = J[i]
+                    G[B[i]][clause_number]["u"] = np.random.binomial(1, 0.5)
+                    G[B[i]][clause_number]["h"] = 0
+                    G[B[i]][clause_number]["delta"] = np.random.rand(1)
+
+        ### All the block clauses ###
+        b = int(math.sqrt(self.board_size))
+        for block_row in range(b):  # for each row of blocks
+            for block_col in range(b):  # for each column of blocks
+                for k in range(self.board_size):  # for each number
+                    B = []
+                    for i in range(b):  # for each row within the block
+                        for j in range(b):  # for each column within the block
+                            row = block_row * b + i
+                            col = block_col * b + j
+                            index = row * self.board_size**2 + col * self.board_size + k
+                            B.append(index)
+                    B = np.array(B)
+                    # at least one of them must be true
+                    self.literals_per_caluse.append(B.tolist())
+                    J = np.ones(B.shape[0])
+                    self.literals_per_caluse_T_or_F.append(J.tolist())
+
+                    clause_number = (
+                        self.N
+                        + self.num_cell_clauses
+                        + self.num_rows_clauses
+                        + self.num_cols_clauses
+                        + t * self.board_size
+                        + i
+                    )
+                    G.add_edges_from([(x, clause_number) for x in B])
+                    self.countLiteralInClause(B, J)
+
+                    for i in range(len(B)):
+                        G[B[i]][clause_number]["J"] = J[i]
+                        G[B[i]][clause_number]["u"] = np.random.binomial(1, 0.5)
+                        G[B[i]][clause_number]["h"] = 0
+                        G[B[i]][clause_number]["delta"] = np.random.rand(1)
+
+        ### All the fixed cells ###
+        for i, cell_index in enumerate(self.fixed_cells):
+            num = self.fixed_cells[cell_index]
+
+            node = cell_index * self.board_size + num
+
+            B = np.array([node])
+            J = np.ones(B.shape[0])
+
+            self.literals_per_caluse.append(B.tolist())
+            self.literals_per_caluse_T_or_F.append(J.tolist())
+
+            clause_number = (
+                self.N
+                + self.num_cell_clauses
+                + self.num_rows_clauses
+                + self.num_cols_clauses
+                + self.num_block_clauses
+                + i
+            )
+            G.add_edges_from([(node, clause_number)])
+            self.countLiteralInClause(B, J)
+
+            for i in range(len(B)):
+                G[B[i]][clause_number]["J"] = J[i]
+                G[B[i]][clause_number]["u"] = np.random.binomial(1, 0.5)
+                G[B[i]][clause_number]["h"] = 0
+                G[B[i]][clause_number]["delta"] = np.random.rand(1)
+
+        return G
+
     ###########################################################################
     # Majority Vote
-    ###########################################################################        
-    
+    ###########################################################################
+
     def MajorityVoteSolver(self):
-        res = np.zeros(self.N).astype('int8')
+        res = np.zeros(self.N).astype("int8")
         for key in self.majority_vote_dictionary:
-            if(key < 1):
+            if key < 1:
                 Negated_literal_value = self.majority_vote_dictionary[key]
                 Un_Negated_literal_value = self.majority_vote_dictionary[-key]
-                
-                if(Negated_literal_value > Un_Negated_literal_value):
-                    res[-key] = -1 #False
+
+                if Negated_literal_value > Un_Negated_literal_value:
+                    res[-key] = -1  # False
                 else:
-                    res[-key] = 1 #True
+                    res[-key] = 1  # True
             else:
-                break            
+                break
         return res
 
-    
     ###########################################################################
     # WARNING PROPAGATION
-    ###########################################################################   
+    ###########################################################################
     def warning_prop(self):
         for t in range(self.max_iter):
-            d = set(nx.get_edge_attributes(self.dgraph, 'u').items())
+            d = set(nx.get_edge_attributes(self.dgraph, "u").items())
             self.wp_update()
-            d_ = set(nx.get_edge_attributes(self.dgraph, 'u').items())
+            d_ = set(nx.get_edge_attributes(self.dgraph, "u").items())
             self.iteration_counter += 1
             if d == d_:
-                self.WPstatus = 'CONVERGED'
+                self.WPstatus = "CONVERGED"
                 return
-        self.WPstatus = 'UNCONVERGED'
+        self.WPstatus = "UNCONVERGED"
 
-        
     def wp_update(self):
         L = list(self.dgraph.edges())
         shuffle(L)
-        for (i,a) in L:
+        for i, a in L:
             # Compute cavity fields
             for j in self.dgraph.neighbors(a):
                 if i == j:
                     continue
-                self.dgraph[j][a]['h'] = 0
+                self.dgraph[j][a]["h"] = 0
                 for b in self.dgraph.neighbors(j):
                     if b == a:
                         continue
-                    self.dgraph[j][a]['h'] += self.dgraph[j][b]['u'] * self.dgraph[j][b]['J']
+                    self.dgraph[j][a]["h"] += (
+                        self.dgraph[j][b]["u"] * self.dgraph[j][b]["J"]
+                    )
 
-            # Compute warnings
-                self.dgraph[i][a]['u'] = 1
+                # Compute warnings
+                self.dgraph[i][a]["u"] = 1
                 for j in self.dgraph.neighbors(a):
                     if i == j:
                         continue
-                    self.dgraph[i][a]['u'] *= np.heaviside(- self.dgraph[j][a]['h'] * self.dgraph[j][a]['J'], 0)
+                    self.dgraph[i][a]["u"] *= np.heaviside(
+                        -self.dgraph[j][a]["h"] * self.dgraph[j][a]["J"], 0
+                    )
 
-
-                        
     def warning_id(self):
-        self.assignment = np.random.choice([-1,1], size=self.N, p=[0.5, 0.5])
-        while(self.WPstatus == None): #np.any(self.assignment == 0):
+        self.assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+        while self.WPstatus == None:  # np.any(self.assignment == 0):
             self.warning_prop()
-            if self.WPstatus == 'UNCONVERGED':
+            if self.WPstatus == "UNCONVERGED":
                 return
             self.wid_localfield()
-            if self.sat == 'UNSAT':
+            if self.sat == "UNSAT":
                 return
             self.wid_assignment()
             self.decimate_graph()
-            if(self.verbose):
+            if self.verbose:
                 print(self.assignment)
                 print(self.H)
                 print("NODES = ", self.dgraph.number_of_nodes())
                 print("EDGES = ", self.dgraph.number_of_edges())
                 print(self.dgraph.edges())
         self.dgraph = self.graph.copy()
-    
+
     def wid_localfield(self):
         # Compute local fields and contradiction numbers
         for i in range(self.N):
@@ -177,15 +350,17 @@ class randomKSAT(object):
             self.H[i] = 0
             self.U[i] = 0
             for a in self.dgraph.neighbors(i):
-                self.H[i] -=  self.dgraph[i][a]['u'] * self.dgraph[i][a]['J']
-                self.U[i, int(np.heaviside(self.dgraph[i][a]['J'], 0))] += self.dgraph[i][a]['u']
-        c = self.U[:,0] * self.U[:,1]
+                self.H[i] -= self.dgraph[i][a]["u"] * self.dgraph[i][a]["J"]
+                self.U[i, int(np.heaviside(self.dgraph[i][a]["J"], 0))] += self.dgraph[
+                    i
+                ][a]["u"]
+        c = self.U[:, 0] * self.U[:, 1]
         self.wp_contradiction_counter = sum(c)
         if np.amax(c) > 0:
-            self.sat = 'UNSAT'
+            self.sat = "UNSAT"
             return
-        self.sat = 'SAT'
-    
+        self.sat = "SAT"
+
     def wid_assignment(self):
         # Determine satisfiable assignment
         mask = np.array([i in self.dgraph.nodes() for i in range(self.N)])
@@ -196,38 +371,37 @@ class randomKSAT(object):
             p = np.argmax(self.H == 0)
             self.H[p] = 1
             self.assignment[p] = 1
-    
-    
+
     ###########################################################################
     # Belief PROPAGATION
     ###########################################################################
- 
+
     def multiplicationForBP(self, values_arr):
         result = 1
         for value in values_arr:
-            result *= (1-value)
+            result *= 1 - value
         return result
-    
+
     def belief_prop(self):
         # Initialize deltas on the edges
-        for (i,a) in self.dgraph.edges():
-            self.dgraph[i][a]['delta'] = np.random.rand(1)
-        
-        #Iteration
-        for t in range(self.max_iter):    
-            d = np.array(list(nx.get_edge_attributes(self.dgraph, 'delta').values()))
+        for i, a in self.dgraph.edges():
+            self.dgraph[i][a]["delta"] = np.random.rand(1)
+
+        # Iteration
+        for t in range(self.max_iter):
+            d = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
             self.bp_update()
-            d_ = np.array(list(nx.get_edge_attributes(self.dgraph, 'delta').values()))
-            self.iteration_counter +=1
+            d_ = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
+            self.iteration_counter += 1
             if np.all(np.abs(d - d_) < self.eps):
                 self.bp_assignment()
                 return
-        self.SPstatus = 'UNCONVERGED'
-        
+        self.SPstatus = "UNCONVERGED"
+
     def bp_update(self):
         L = list(self.dgraph.edges())
         shuffle(L)
-        for (i,a) in L:
+        for i, a in L:
             # Compute cavity fields
             for j in self.dgraph.neighbors(a):
                 if i == j:
@@ -236,88 +410,85 @@ class randomKSAT(object):
                 for b in self.dgraph.neighbors(j):
                     if b == a:
                         continue
-                    p = int(np.heaviside(self.dgraph[j][a]['J'] * self.dgraph[j][b]['J'], 0))
-                    prod_tmp[p] *= (1 - self.dgraph[j][b]['delta'])
-                self.dgraph[j][a]['P_u'] = prod_tmp[1]
-                self.dgraph[j][a]['P_s'] = prod_tmp[0]
-                        
+                    p = int(
+                        np.heaviside(self.dgraph[j][a]["J"] * self.dgraph[j][b]["J"], 0)
+                    )
+                    prod_tmp[p] *= 1 - self.dgraph[j][b]["delta"]
+                self.dgraph[j][a]["P_u"] = prod_tmp[1]
+                self.dgraph[j][a]["P_s"] = prod_tmp[0]
+
             # Compute warnings
-            self.dgraph[i][a]['delta'] = 1
+            self.dgraph[i][a]["delta"] = 1
             for j in self.dgraph.neighbors(a):
                 if i == j:
                     continue
-                tot = (self.dgraph[j][a]['P_u'] + self.dgraph[j][a]['P_s'])
+                tot = self.dgraph[j][a]["P_u"] + self.dgraph[j][a]["P_s"]
                 if tot == 0:
-                    self.dgraph[i][a]['delta'] = 1
+                    self.dgraph[i][a]["delta"] = 1
                     break
-                p = self.dgraph[j][a]['P_u'] / tot
-                self.dgraph[i][a]['delta'] *= p
-                
+                p = self.dgraph[j][a]["P_u"] / tot
+                self.dgraph[i][a]["delta"] *= p
+
     def bp_assignment(self):
         pos_dict = {}
-        neg_dict = {}            
-                
-        for (node,clause) in nx.get_edge_attributes(self.dgraph, 'delta'):
-            sign = self.dgraph[node][clause]['J']
-            if(sign == -1):
-                #append to pos_dict
-                if(node in pos_dict):
-                    pos_dict[node].append(self.dgraph[node][clause]['delta'])
+        neg_dict = {}
+
+        for node, clause in nx.get_edge_attributes(self.dgraph, "delta"):
+            sign = self.dgraph[node][clause]["J"]
+            if sign == -1:
+                # append to pos_dict
+                if node in pos_dict:
+                    pos_dict[node].append(self.dgraph[node][clause]["delta"])
                 else:
-                    pos_dict[node] = [self.dgraph[node][clause]['delta']]
-            elif(sign == 1):
-                #append to neg_dict
-                if(node in neg_dict):
-                    neg_dict[node].append(self.dgraph[node][clause]['delta'])
+                    pos_dict[node] = [self.dgraph[node][clause]["delta"]]
+            elif sign == 1:
+                # append to neg_dict
+                if node in neg_dict:
+                    neg_dict[node].append(self.dgraph[node][clause]["delta"])
                 else:
-                    neg_dict[node] = [self.dgraph[node][clause]['delta']]
+                    neg_dict[node] = [self.dgraph[node][clause]["delta"]]
 
         for key in range(self.N):
             numerator = 1
             denominator = 1
-            if(key in pos_dict):
+            if key in pos_dict:
                 delta_arr1 = pos_dict[key]
                 numerator = self.multiplicationForBP(delta_arr1)
                 denominator = numerator
             else:
                 numerator = 0
-                        
-            if(key in neg_dict):
+
+            if key in neg_dict:
                 delta_arr2 = neg_dict[key]
                 denominator += self.multiplicationForBP(delta_arr2)
-                    
-            if(denominator == 0):
+
+            if denominator == 0:
                 res = 1
             else:
-                res = numerator/denominator
+                res = numerator / denominator
 
-            #self.assignment[key] = np.random.choice([-1,1], size=1, p=[res,1-res])#p=[1-res, res])
-            
-            '''
+            # self.assignment[key] = np.random.choice([-1,1], size=1, p=[res,1-res])#p=[1-res, res])
+
+            """
             if the probability to be FLASE is greater than 0.6, assign the literal to -1 (flase)
             if the probability to be TRUE is greater than 0.6, assign the literal to 1 (true)
             else, assign 0 (don't care) 
-            '''
-            if(res > 0.6):
-                self.assignment[key] = -1 
-            elif (1-res > 0.6):
+            """
+            if res > 0.6:
+                self.assignment[key] = -1
+            elif 1 - res > 0.6:
                 self.assignment[key] = 1
             else:
                 self.assignment[key] = 0
-             
-        
 
     ###########################################################################
     # SURVEY PROPAGATION
     ###########################################################################
- 
-
-
 
     def sp_update(self):
         L = list(self.dgraph.edges())
         shuffle(L)
-        for (i,a) in L:
+        for i, a in L:
             # Compute cavity fields
             for j in self.dgraph.neighbors(a):
                 if i == j:
@@ -326,88 +497,620 @@ class randomKSAT(object):
                 for b in self.dgraph.neighbors(j):
                     if b == a:
                         continue
-                    p = int(np.heaviside(self.dgraph[j][a]['J'] * self.dgraph[j][b]['J'], 0))
-                    prod_tmp[p] *= (1 - self.dgraph[j][b]['delta'])
-                self.dgraph[j][a]['P_u'] = (1 - prod_tmp[0]) * prod_tmp[1]
-                self.dgraph[j][a]['P_s'] = (1 - prod_tmp[1]) * prod_tmp[0]
-                self.dgraph[j][a]['P_0'] = prod_tmp[0] * prod_tmp[1]
-                self.dgraph[j][a]['P_c'] = (1-prod_tmp[0]) * (1-prod_tmp[1])
-                        
+                    p = int(
+                        np.heaviside(self.dgraph[j][a]["J"] * self.dgraph[j][b]["J"], 0)
+                    )
+                    prod_tmp[p] *= 1 - self.dgraph[j][b]["delta"]
+                self.dgraph[j][a]["P_u"] = (1 - prod_tmp[0]) * prod_tmp[1]
+                self.dgraph[j][a]["P_s"] = (1 - prod_tmp[1]) * prod_tmp[0]
+                self.dgraph[j][a]["P_0"] = prod_tmp[0] * prod_tmp[1]
+                self.dgraph[j][a]["P_c"] = (1 - prod_tmp[0]) * (1 - prod_tmp[1])
+
             # Compute warnings
-            self.dgraph[i][a]['delta'] = 1
+            self.dgraph[i][a]["delta"] = 1
             for j in self.dgraph.neighbors(a):
                 if i == j:
                     continue
-                tot = (self.dgraph[j][a]['P_u'] + self.dgraph[j][a]['P_s'] + self.dgraph[j][a]['P_0'])# + self.dgraph[j][a]['P_c'])
+                tot = (
+                    self.dgraph[j][a]["P_u"]
+                    + self.dgraph[j][a]["P_s"]
+                    + self.dgraph[j][a]["P_0"]
+                )  # + self.dgraph[j][a]['P_c'])
                 if tot == 0:
-                    self.dgraph[i][a]['delta'] = 1
+                    self.dgraph[i][a]["delta"] = 1
                     break
-                p = self.dgraph[j][a]['P_u'] / tot
-                self.dgraph[i][a]['delta'] *= p
+                p = self.dgraph[j][a]["P_u"] / tot
+                self.dgraph[i][a]["delta"] *= p
 
-        
     def sid_localfield(self):
         prod_tmp = np.ones((self.N, 2))
         for i in range(self.N):
             if i not in self.dgraph.nodes():
                 continue
             for a in self.dgraph.neighbors(i):
-                p = int(np.heaviside(self.dgraph[i][a]['J'], 0))
-                prod_tmp[i,p] *= (1 - self.dgraph[i][a]['delta'])
+                p = int(np.heaviside(self.dgraph[i][a]["J"], 0))
+                prod_tmp[i, p] *= 1 - self.dgraph[i][a]["delta"]
         pi = np.ones((self.N, 4))
-        pi[:,0] = (1 - prod_tmp[:,0]) * prod_tmp[:,1] # V plus
-        pi[:,1] = (1 - prod_tmp[:,1]) * prod_tmp[:,0]
-        pi[:,2] = prod_tmp[:,0] * prod_tmp[:,1]
-        #pi[:,3] = (1 - prod_tmp[:,0]) * (1 - prod_tmp[:,1])
-        tot = (pi[:,0] + pi[:,1] + pi[:,2])# + pi[:,3])
-        pi[(tot == 0),0] = 0
-        pi[(tot == 0),1] = 0
-        pi[(tot == 0),2] = 0
+        pi[:, 0] = (1 - prod_tmp[:, 0]) * prod_tmp[:, 1]  # V plus
+        pi[:, 1] = (1 - prod_tmp[:, 1]) * prod_tmp[:, 0]
+        pi[:, 2] = prod_tmp[:, 0] * prod_tmp[:, 1]
+        # pi[:,3] = (1 - prod_tmp[:,0]) * (1 - prod_tmp[:,1])
+        tot = pi[:, 0] + pi[:, 1] + pi[:, 2]  # + pi[:,3])
+        pi[(tot == 0), 0] = 0
+        pi[(tot == 0), 1] = 0
+        pi[(tot == 0), 2] = 0
         tot[tot == 0] = 1
-        self.W[:,0] = pi[:,0] / tot
-        self.W[:,1] = pi[:,1] / tot
-        self.W[:,2] = pi[:,2] / tot
-        
-        
+        self.W[:, 0] = pi[:, 0] / tot
+        self.W[:, 1] = pi[:, 1] / tot
+        self.W[:, 2] = pi[:, 2] / tot
+
     def survey_prop(self):
-        for (i,a) in self.dgraph.edges():
-            self.dgraph[i][a]['delta'] = np.random.rand(1)
+        for i, a in self.dgraph.edges():
+            self.dgraph[i][a]["delta"] = np.random.rand(1)
         for t in range(self.max_iter):
-            d = np.array(list(nx.get_edge_attributes(self.dgraph, 'delta').values()))
+            d = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
             self.sp_update()
-            d_ = np.array(list(nx.get_edge_attributes(self.dgraph, 'delta').values()))
-            self.iteration_counter +=1
-            if(np.all(np.abs(d-d_))<self.eps):
-                self.SPstatus = 'CONVERGED'
+            d_ = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
+            self.iteration_counter += 1
+            if np.all(np.abs(d - d_)) < self.eps:
+                self.SPstatus = "CONVERGED"
                 return
-        self.SPstatus = 'UNCONVERGED'
-        
+        self.SPstatus = "UNCONVERGED"
+
     def surveyID(self):
         self.survey_prop()
-        if(self.SPstatus == 'CONVERGED'):
-            if(self.nonTrivialSurvey() == True):
-                while(self.dgraph.number_of_edges() > 0):
+        if self.SPstatus == "CONVERGED":
+            if self.nonTrivialSurvey() == True:
+                while self.dgraph.number_of_edges() > 0:
                     self.sid_localfield()
-                    p = np.argmax(np.abs(self.W[:,0] - self.W[:,1]))
-                    self.assignment[p] = np.sign(self.W[p,0] - self.W[p,1])
-                    if(self.W[p,0] == self.W[p,1]):
+                    p = np.argmax(np.abs(self.W[:, 0] - self.W[:, 1]))
+                    self.assignment[p] = np.sign(self.W[p, 0] - self.W[p, 1])
+                    if self.W[p, 0] == self.W[p, 1]:
                         p = int(list(self.dgraph.nodes())[0])
-                        self.assignment[p] = np.random.choice([-1,1], size=1, p=[0.5, 0.5])
+                        self.assignment[p] = np.random.choice(
+                            [-1, 1], size=1, p=[0.5, 0.5]
+                        )
                     self.decimate_graph()
                 return
             else:
                 ##need to implement wlaksat (random walk)
-                self.assignment = np.random.choice([-1,1], size=self.N, p=[0.5, 0.5])
+                self.assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
         else:
             self.SAT_validation = False
             return
-    
+
     def nonTrivialSurvey(self):
-        for (i,a) in self.dgraph.edges():
-            if(self.dgraph[i][a]['delta'] != 0):
+        for i, a in self.dgraph.edges():
+            if self.dgraph[i][a]["delta"] != 0:
                 return True
         return False
-        
+
+        ###########################################################################
+        # SERVICE FUNCTIONS
+        ###########################################################################
+        ### first add edges for each cell
+        for i in range(self.N):
+            for j in range(self.N):
+                if i != j:
+                    G.add_edge(i, j, J=np.random.choice([-1, 1], size=1, p=[0.5, 0.5]))
+
+        return G
+
+    def initializeDictionary(self):
+        return dict.fromkeys(list(range(-self.N + 1, self.N)), 0)
+
+    def countLiteralInClause(self, clause, signs):
+        for i in range(len(clause)):
+            literal = clause[i]
+            if signs[i] == -1:
+                key = literal
+            elif signs[i] == 1:
+                key = -1 * literal
+            self.majority_vote_dictionary[key] += 1
+
+    def decimate_graph(self):
+        for i in range(self.N):
+            if self.assignment[i] == 0:
+                continue
+            if i not in self.dgraph.nodes():
+                continue
+            l = []
+            for a in self.dgraph.neighbors(i):
+                if self.dgraph[i][a]["J"] * self.assignment[i] == -1:
+                    l.append(a)
+            for a in l:
+                self.dgraph.remove_node(a)
+            self.dgraph.remove_node(i)
+
+    def check_truth(self):
+        l = []
+        for a in range(self.N, self.N + self.M):
+            for i in self.graph.neighbors(a):
+                if self.graph[i][a]["J"] * self.assignment[i] == -1:
+                    l.append(a)
+                    break
+        return len(l) == self.M
+
+    def validateFinalAssignmemt(self):
+        assignments = self.assignment.astype(int)
+        results_arr = []
+        literal_dict = {}
+        self.num_of_SAT_clauses = self.M + self.num_of_additional_clauses_for_anomaly
+        result = False
+        for i in range(0, self.N):
+            literal_dict[i] = "Don't Care"
+        for i in range(0, len(self.literals_per_caluse)):
+
+            clause = self.literals_per_caluse[i]
+            in_caluse_assignments = self.literals_per_caluse_T_or_F[i]
+
+            result_arr = []
+            for j in range(0, len(clause)):
+                literal_operation = in_caluse_assignments[j]
+                literal = clause[j]
+                if assignments[literal] == 0:  # Dont care
+                    result_arr.append(True)
+                elif literal_operation == -1 and assignments[literal] == 1:
+                    result_arr.append(True)
+                elif literal_operation == -1 and assignments[literal] == -1:
+                    result_arr.append(False)
+                elif literal_operation == 1 and assignments[literal] == 1:
+                    result_arr.append(False)
+                elif literal_operation == 1 and assignments[literal] == -1:
+                    result_arr.append(True)
+            results_arr.append(result_arr)
+        for caluse_assignment in results_arr:
+            result = False
+            for literal_assignment in caluse_assignment:
+                result = result or literal_assignment
+            if result == False:
+                self.num_of_SAT_clauses -= 1
+
+        for i in range(0, len(assignments)):
+            if assignments[i] == 1:
+                literal_dict[i] = "True"
+            elif assignments[i] == -1:
+                literal_dict[i] = "False"
+            # print("\nThis expression is SAT the literals values are:\n\n{}".format(literal_dict))
+
+        if (
+            self.num_of_SAT_clauses
+            == self.M + self.num_of_additional_clauses_for_anomaly
+        ):
+            self.SAT_validation = True
+        else:
+            self.SAT_validation = False
+        return literal_dict, result
+
+    def majorityVoteValidation(self):
+        assignments = self.majority_vote_result.astype(int)
+        results_arr = []
+
+        for i in range(0, len(self.literals_per_caluse)):
+            clause = self.literals_per_caluse[i]
+            in_caluse_assignments = self.literals_per_caluse_T_or_F[i]
+            result_arr = []
+            for j in range(0, len(clause)):
+                literal_operation = in_caluse_assignments[j]
+                literal = clause[j]
+                if assignments[literal] == 0:  # Dont care
+                    result_arr.append(True)
+                elif literal_operation == -1 and assignments[literal] == 1:
+                    result_arr.append(True)
+                elif literal_operation == -1 and assignments[literal] == -1:
+                    result_arr.append(False)
+                elif literal_operation == 1 and assignments[literal] == 1:
+                    result_arr.append(False)
+                elif literal_operation == 1 and assignments[literal] == -1:
+                    result_arr.append(True)
+
+            results_arr.append(result_arr)
+        for caluse_assignment in results_arr:
+            result = False
+            for literal_assignment in caluse_assignment:
+                result = result or literal_assignment
+            if result == False:
+                self.num_of_SAT_clauses_majority -= 1
+
+        if self.num_of_SAT_clauses_majority == self.M:
+            self.SAT_validation_majority = True
+        else:
+            self.SAT_validation_majority = False
+
+    def dontCarePrecentage(self):
+        counter = 0
+        assignments = self.assignment.astype(int)
+        for literal_assignment in assignments:
+            if literal_assignment == 0:
+                counter = counter + 1
+
+        return counter / self.N
+
+
+class randomKSAT(object):
+
+    def __init__(
+        self, N, M, K, max_iter, eps=1e-3, rand_assignment=False, verbose=False
+    ):
+        super(randomKSAT, self)
+
+        # General features
+        self.N = N
+        self.M = M
+        self.K = K
+        self.max_iter = max_iter
+        self.eps = eps
+        self.rand_assignment = rand_assignment
+        self.verbose = verbose
+
+        # Array of literals per clause for result validation
+        self.literals_per_caluse = []
+        # Array that tells us if a literal is True or False in a clause
+        self.literals_per_caluse_T_or_F = []
+
+        self.majority_vote_dictionary = self.initializeDictionary()
+
+        self.warnings_dictionary = self.initializeDictionary()
+
+        self.num_of_additional_clauses_for_anomaly = 0
+
+        self.graph = self.initialize_graph()
+        self.dgraph = self.graph.copy()
+
+        self.majority_vote_result = self.MajorityVoteSolver()
+
+        self.WPstatus = None
+        self.SPstatus = None
+        self.sat = None
+        self.SPstatus = None
+        # for warning propagation
+        self.H = np.zeros(self.N)
+        self.U = np.zeros((self.N, 2))
+        # for survey propagation
+        self.W = np.zeros((self.N, 3))
+
+        self.iteration_counter = 0
+        self.num_of_SAT_clauses = self.M
+        self.SAT_validation = None
+
+        self.num_of_SAT_clauses_majority = self.M
+        self.SAT_validation_majority = None
+        self.majorityVoteValidation()
+
+        self.wp_contradiction_counter = 0
+
+        self.literal_assignment = np.zeros(self.N)
+
+        if self.rand_assignment == False:
+            self.assignment = np.zeros(self.N)
+        else:
+            self.assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+
+        if self.verbose:
+            print(self.dgraph.edges())
+
+    ###########################################################################
+    # Majority Vote
+    ###########################################################################
+
+    def MajorityVoteSolver(self):
+        res = np.zeros(self.N).astype("int8")
+        for key in self.majority_vote_dictionary:
+            if key < 1:
+                Negated_literal_value = self.majority_vote_dictionary[key]
+                Un_Negated_literal_value = self.majority_vote_dictionary[-key]
+
+                if Negated_literal_value > Un_Negated_literal_value:
+                    res[-key] = -1  # False
+                else:
+                    res[-key] = 1  # True
+            else:
+                break
+        return res
+
+    ###########################################################################
+    # WARNING PROPAGATION
+    ###########################################################################
+    def warning_prop(self):
+        for t in range(self.max_iter):
+            d = set(nx.get_edge_attributes(self.dgraph, "u").items())
+            self.wp_update()
+            d_ = set(nx.get_edge_attributes(self.dgraph, "u").items())
+            self.iteration_counter += 1
+            if d == d_:
+                self.WPstatus = "CONVERGED"
+                return
+        self.WPstatus = "UNCONVERGED"
+
+    def wp_update(self):
+        L = list(self.dgraph.edges())
+        shuffle(L)
+        for i, a in L:
+            # Compute cavity fields
+            for j in self.dgraph.neighbors(a):
+                if i == j:
+                    continue
+                self.dgraph[j][a]["h"] = 0
+                for b in self.dgraph.neighbors(j):
+                    if b == a:
+                        continue
+                    self.dgraph[j][a]["h"] += (
+                        self.dgraph[j][b]["u"] * self.dgraph[j][b]["J"]
+                    )
+
+                # Compute warnings
+                self.dgraph[i][a]["u"] = 1
+                for j in self.dgraph.neighbors(a):
+                    if i == j:
+                        continue
+                    self.dgraph[i][a]["u"] *= np.heaviside(
+                        -self.dgraph[j][a]["h"] * self.dgraph[j][a]["J"], 0
+                    )
+
+    def warning_id(self):
+        self.assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+        while self.WPstatus == None:  # np.any(self.assignment == 0):
+            self.warning_prop()
+            if self.WPstatus == "UNCONVERGED":
+                return
+            self.wid_localfield()
+            if self.sat == "UNSAT":
+                return
+            self.wid_assignment()
+            self.decimate_graph()
+            if self.verbose:
+                print(self.assignment)
+                print(self.H)
+                print("NODES = ", self.dgraph.number_of_nodes())
+                print("EDGES = ", self.dgraph.number_of_edges())
+                print(self.dgraph.edges())
+        self.dgraph = self.graph.copy()
+
+    def wid_localfield(self):
+        # Compute local fields and contradiction numbers
+        for i in range(self.N):
+            if i not in self.dgraph.nodes():
+                continue
+            self.H[i] = 0
+            self.U[i] = 0
+            for a in self.dgraph.neighbors(i):
+                self.H[i] -= self.dgraph[i][a]["u"] * self.dgraph[i][a]["J"]
+                self.U[i, int(np.heaviside(self.dgraph[i][a]["J"], 0))] += self.dgraph[
+                    i
+                ][a]["u"]
+        c = self.U[:, 0] * self.U[:, 1]
+        self.wp_contradiction_counter = sum(c)
+        print(self.U)
+        print("SUM", sum(c))
+        if np.amax(c) > 0:
+            self.sat = "UNSAT"
+            return
+        self.sat = "SAT"
+
+    def wid_assignment(self):
+        # Determine satisfiable assignment
+        mask = np.array([i in self.dgraph.nodes() for i in range(self.N)])
+        if np.any(self.H[mask] != 0):
+            self.assignment[(self.H > 0) & mask] = 1
+            self.assignment[(self.H < 0) & mask] = -1
+        else:
+            p = np.argmax(self.H == 0)
+            self.H[p] = 1
+            self.assignment[p] = 1
+
+    ###########################################################################
+    # Belief PROPAGATION
+    ###########################################################################
+
+    def multiplicationForBP(self, values_arr):
+        result = 1
+        for value in values_arr:
+            result *= 1 - value
+        return result
+
+    def belief_prop(self):
+        # Initialize deltas on the edges
+        for i, a in self.dgraph.edges():
+            self.dgraph[i][a]["delta"] = np.random.rand(1)
+
+        # Iteration
+        for t in range(self.max_iter):
+            d = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
+            self.bp_update()
+            d_ = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
+            self.iteration_counter += 1
+            if np.all(np.abs(d - d_) < self.eps):
+                self.bp_assignment()
+                return
+        self.SPstatus = "UNCONVERGED"
+
+    def bp_update(self):
+        L = list(self.dgraph.edges())
+        shuffle(L)
+        for i, a in L:
+            # Compute cavity fields
+            for j in self.dgraph.neighbors(a):
+                if i == j:
+                    continue
+                prod_tmp = np.ones(2)
+                for b in self.dgraph.neighbors(j):
+                    if b == a:
+                        continue
+                    p = int(
+                        np.heaviside(self.dgraph[j][a]["J"] * self.dgraph[j][b]["J"], 0)
+                    )
+                    prod_tmp[p] *= 1 - self.dgraph[j][b]["delta"]
+                self.dgraph[j][a]["P_u"] = prod_tmp[1]
+                self.dgraph[j][a]["P_s"] = prod_tmp[0]
+
+            # Compute warnings
+            self.dgraph[i][a]["delta"] = 1
+            for j in self.dgraph.neighbors(a):
+                if i == j:
+                    continue
+                tot = self.dgraph[j][a]["P_u"] + self.dgraph[j][a]["P_s"]
+                if tot == 0:
+                    self.dgraph[i][a]["delta"] = 1
+                    break
+                p = self.dgraph[j][a]["P_u"] / tot
+                self.dgraph[i][a]["delta"] *= p
+
+    def bp_assignment(self):
+        pos_dict = {}
+        neg_dict = {}
+
+        for node, clause in nx.get_edge_attributes(self.dgraph, "delta"):
+            sign = self.dgraph[node][clause]["J"]
+            if sign == -1:
+                # append to pos_dict
+                if node in pos_dict:
+                    pos_dict[node].append(self.dgraph[node][clause]["delta"])
+                else:
+                    pos_dict[node] = [self.dgraph[node][clause]["delta"]]
+            elif sign == 1:
+                # append to neg_dict
+                if node in neg_dict:
+                    neg_dict[node].append(self.dgraph[node][clause]["delta"])
+                else:
+                    neg_dict[node] = [self.dgraph[node][clause]["delta"]]
+
+        for key in range(self.N):
+            numerator = 1
+            denominator = 1
+            if key in pos_dict:
+                delta_arr1 = pos_dict[key]
+                numerator = self.multiplicationForBP(delta_arr1)
+                denominator = numerator
+            else:
+                numerator = 0
+
+            if key in neg_dict:
+                delta_arr2 = neg_dict[key]
+                denominator += self.multiplicationForBP(delta_arr2)
+
+            if denominator == 0:
+                res = 1
+            else:
+                res = numerator / denominator
+
+            # self.assignment[key] = np.random.choice([-1,1], size=1, p=[res,1-res])#p=[1-res, res])
+
+            """
+            if the probability to be FLASE is greater than 0.6, assign the literal to -1 (flase)
+            if the probability to be TRUE is greater than 0.6, assign the literal to 1 (true)
+            else, assign 0 (don't care) 
+            """
+            if res > 0.6:
+                self.assignment[key] = -1
+            elif 1 - res > 0.6:
+                self.assignment[key] = 1
+            else:
+                self.assignment[key] = 0
+
+    ###########################################################################
+    # SURVEY PROPAGATION
+    ###########################################################################
+
+    def sp_update(self):
+        L = list(self.dgraph.edges())
+        shuffle(L)
+        for i, a in L:
+            # Compute cavity fields
+            for j in self.dgraph.neighbors(a):
+                if i == j:
+                    continue
+                prod_tmp = np.ones(2)
+                for b in self.dgraph.neighbors(j):
+                    if b == a:
+                        continue
+                    p = int(
+                        np.heaviside(self.dgraph[j][a]["J"] * self.dgraph[j][b]["J"], 0)
+                    )
+                    prod_tmp[p] *= 1 - self.dgraph[j][b]["delta"]
+                self.dgraph[j][a]["P_u"] = (1 - prod_tmp[0]) * prod_tmp[1]
+                self.dgraph[j][a]["P_s"] = (1 - prod_tmp[1]) * prod_tmp[0]
+                self.dgraph[j][a]["P_0"] = prod_tmp[0] * prod_tmp[1]
+                self.dgraph[j][a]["P_c"] = (1 - prod_tmp[0]) * (1 - prod_tmp[1])
+
+            # Compute warnings
+            self.dgraph[i][a]["delta"] = 1
+            for j in self.dgraph.neighbors(a):
+                if i == j:
+                    continue
+                tot = (
+                    self.dgraph[j][a]["P_u"]
+                    + self.dgraph[j][a]["P_s"]
+                    + self.dgraph[j][a]["P_0"]
+                )  # + self.dgraph[j][a]['P_c'])
+                if tot == 0:
+                    self.dgraph[i][a]["delta"] = 1
+                    break
+                p = self.dgraph[j][a]["P_u"] / tot
+                self.dgraph[i][a]["delta"] *= p
+
+    def sid_localfield(self):
+        prod_tmp = np.ones((self.N, 2))
+        for i in range(self.N):
+            if i not in self.dgraph.nodes():
+                continue
+            for a in self.dgraph.neighbors(i):
+                p = int(np.heaviside(self.dgraph[i][a]["J"], 0))
+                prod_tmp[i, p] *= 1 - self.dgraph[i][a]["delta"]
+        pi = np.ones((self.N, 4))
+        pi[:, 0] = (1 - prod_tmp[:, 0]) * prod_tmp[:, 1]  # V plus
+        pi[:, 1] = (1 - prod_tmp[:, 1]) * prod_tmp[:, 0]
+        pi[:, 2] = prod_tmp[:, 0] * prod_tmp[:, 1]
+        # pi[:,3] = (1 - prod_tmp[:,0]) * (1 - prod_tmp[:,1])
+        tot = pi[:, 0] + pi[:, 1] + pi[:, 2]  # + pi[:,3])
+        pi[(tot == 0), 0] = 0
+        pi[(tot == 0), 1] = 0
+        pi[(tot == 0), 2] = 0
+        tot[tot == 0] = 1
+        self.W[:, 0] = pi[:, 0] / tot
+        self.W[:, 1] = pi[:, 1] / tot
+        self.W[:, 2] = pi[:, 2] / tot
+
+    def survey_prop(self):
+        for i, a in self.dgraph.edges():
+            self.dgraph[i][a]["delta"] = np.random.rand(1)
+        for t in range(self.max_iter):
+            d = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
+            self.sp_update()
+            d_ = np.array(list(nx.get_edge_attributes(self.dgraph, "delta").values()))
+            self.iteration_counter += 1
+            if np.all(np.abs(d - d_)) < self.eps:
+                self.SPstatus = "CONVERGED"
+                return
+        self.SPstatus = "UNCONVERGED"
+
+    def surveyID(self):
+        self.survey_prop()
+        if self.SPstatus == "CONVERGED":
+            if self.nonTrivialSurvey() == True:
+                while self.dgraph.number_of_edges() > 0:
+                    self.sid_localfield()
+                    p = np.argmax(np.abs(self.W[:, 0] - self.W[:, 1]))
+                    self.assignment[p] = np.sign(self.W[p, 0] - self.W[p, 1])
+                    if self.W[p, 0] == self.W[p, 1]:
+                        p = int(list(self.dgraph.nodes())[0])
+                        self.assignment[p] = np.random.choice(
+                            [-1, 1], size=1, p=[0.5, 0.5]
+                        )
+                    self.decimate_graph()
+                return
+            else:
+                ##need to implement wlaksat (random walk)
+                self.assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+        else:
+            self.SAT_validation = False
+            return
+
+    def nonTrivialSurvey(self):
+        for i, a in self.dgraph.edges():
+            if self.dgraph[i][a]["delta"] != 0:
+                return True
+        return False
+
     ###########################################################################
     # SERVICE FUNCTIONS
     ###########################################################################
@@ -418,32 +1121,30 @@ class randomKSAT(object):
         for t in range(self.M):
             B = np.unique(np.random.choice(self.N, self.K))
             self.literals_per_caluse.append(B.tolist())
-            J = np.random.binomial(1, .5, size = np.shape(B))
-            J[J==0] = -1
+            J = np.random.binomial(1, 0.5, size=np.shape(B))
+            J[J == 0] = -1
             self.literals_per_caluse_T_or_F.append(J.tolist())
             G.add_edges_from([(x, self.N + t) for x in B])
             self.countLiteralInClause(B, J)
             for i in range(len(B)):
-                G[B[i]][self.N + t]['J'] = J[i]
-                G[B[i]][self.N + t]['u'] = np.random.binomial(1, .5)
-                G[B[i]][self.N + t]['h'] = 0
-                G[B[i]][self.N + t]['delta'] = np.random.rand(1)
+                G[B[i]][self.N + t]["J"] = J[i]
+                G[B[i]][self.N + t]["u"] = np.random.binomial(1, 0.5)
+                G[B[i]][self.N + t]["h"] = 0
+                G[B[i]][self.N + t]["delta"] = np.random.rand(1)
         return G
-    
+
     def initializeDictionary(self):
-        return dict.fromkeys(list(range(-self.N+1, self.N)),0)
-    
+        return dict.fromkeys(list(range(-self.N + 1, self.N)), 0)
+
     def countLiteralInClause(self, clause, signs):
         for i in range(len(clause)):
             literal = clause[i]
-            if(signs[i] == -1):
+            if signs[i] == -1:
                 key = literal
-            elif(signs[i] == 1):
-                key = -1*literal
-            self.majority_vote_dictionary[key] +=1
-        
-            
-    
+            elif signs[i] == 1:
+                key = -1 * literal
+            self.majority_vote_dictionary[key] += 1
+
     def decimate_graph(self):
         for i in range(self.N):
             if self.assignment[i] == 0:
@@ -452,135 +1153,143 @@ class randomKSAT(object):
                 continue
             l = []
             for a in self.dgraph.neighbors(i):
-                if self.dgraph[i][a]['J'] * self.assignment[i] == -1:
+                if self.dgraph[i][a]["J"] * self.assignment[i] == -1:
                     l.append(a)
             for a in l:
                 self.dgraph.remove_node(a)
             self.dgraph.remove_node(i)
-            
+
     def check_truth(self):
         l = []
         for a in range(self.N, self.N + self.M):
             for i in self.graph.neighbors(a):
-                if self.graph[i][a]['J'] * self.assignment[i] == -1:
+                if self.graph[i][a]["J"] * self.assignment[i] == -1:
                     l.append(a)
                     break
         return len(l) == self.M
-    
 
     def validateFinalAssignmemt(self):
-         assignments = self.assignment.astype(int)
-         results_arr = []
-         literal_dict = {}
-         self.num_of_SAT_clauses = self.M + self.num_of_additional_clauses_for_anomaly
-         result = False
-         for i in range(0, self.N):
+        assignments = self.assignment.astype(int)
+        print(assignments)
+        results_arr = []
+        literal_dict = {}
+        self.num_of_SAT_clauses = self.M + self.num_of_additional_clauses_for_anomaly
+        result = False
+        for i in range(0, self.N):
             literal_dict[i] = "Don't Care"
-         for i in range(0,len(self.literals_per_caluse)):
-             
-             clause = self.literals_per_caluse[i]
-             in_caluse_assignments = self.literals_per_caluse_T_or_F[i]
-             
-             result_arr = []
-             for j in range(0,len(clause)):
-                literal_operation = in_caluse_assignments[j] 
+        for i in range(0, len(self.literals_per_caluse)):
+
+            clause = self.literals_per_caluse[i]
+            # print(f"clause {i}: {clause}")
+            in_caluse_assignments = self.literals_per_caluse_T_or_F[i]
+            # print(f"in_clause_assignments {i}: {in_caluse_assignments}")
+
+            result_arr = []
+            for j in range(0, len(clause)):
+                literal_operation = in_caluse_assignments[j]
                 literal = clause[j]
-                if(assignments[literal] == 0): #Dont care
+                if assignments[literal] == 0:  # Dont care
                     result_arr.append(True)
-                elif(literal_operation == -1 and assignments[literal] == 1):
+                elif literal_operation == -1 and assignments[literal] == 1:
                     result_arr.append(True)
-                elif(literal_operation == -1 and assignments[literal] == -1):
+                elif literal_operation == -1 and assignments[literal] == -1:
                     result_arr.append(False)
-                elif(literal_operation == 1 and assignments[literal] == 1):
+                elif literal_operation == 1 and assignments[literal] == 1:
                     result_arr.append(False)
-                elif(literal_operation == 1 and assignments[literal] == -1):
+                elif literal_operation == 1 and assignments[literal] == -1:
                     result_arr.append(True)
-             results_arr.append(result_arr)       
-         for caluse_assignment in results_arr:
-             result = False
-             for literal_assignment in caluse_assignment:
-                 result = result or literal_assignment
-             if(result == False):
-                self.num_of_SAT_clauses -= 1 
-        
-        
-         for i in range(0, len(assignments)):
-            if(assignments[i]==1):
-                literal_dict[i] = 'True'
-            elif(assignments[i]==-1):
-                literal_dict[i] = 'False'
-             #print("\nThis expression is SAT the literals values are:\n\n{}".format(literal_dict))
-             
-         if(self.num_of_SAT_clauses == self.M + self.num_of_additional_clauses_for_anomaly):
-             self.SAT_validation = True
-         else:
-             self.SAT_validation = False
-         return literal_dict, result
-     
-        
+            results_arr.append(result_arr)
+        for caluse_assignment in results_arr:
+            result = False
+            for literal_assignment in caluse_assignment:
+                result = result or literal_assignment
+            if result == False:
+                self.num_of_SAT_clauses -= 1
+
+        for i in range(0, len(assignments)):
+            if assignments[i] == 1:
+                literal_dict[i] = "True"
+            elif assignments[i] == -1:
+                literal_dict[i] = "False"
+            # print(
+            #     "\nThis expression is SAT the literals values are:\n\n{}".format(
+            #         literal_dict
+            #     )
+            # )
+        if (
+            self.num_of_SAT_clauses
+            == self.M + self.num_of_additional_clauses_for_anomaly
+        ):
+            self.SAT_validation = True
+        else:
+            self.SAT_validation = False
+        # print("result", result)
+        return literal_dict, result
+
     def majorityVoteValidation(self):
         assignments = self.majority_vote_result.astype(int)
         results_arr = []
 
-        for i in range(0,len(self.literals_per_caluse)):
+        for i in range(0, len(self.literals_per_caluse)):
             clause = self.literals_per_caluse[i]
             in_caluse_assignments = self.literals_per_caluse_T_or_F[i]
             result_arr = []
-            for j in range(0,len(clause)):
-                literal_operation = in_caluse_assignments[j] 
+            for j in range(0, len(clause)):
+                literal_operation = in_caluse_assignments[j]
                 literal = clause[j]
-                if(assignments[literal] == 0): #Dont care
+                if assignments[literal] == 0:  # Dont care
                     result_arr.append(True)
-                elif(literal_operation == -1 and assignments[literal] == 1):
+                elif literal_operation == -1 and assignments[literal] == 1:
                     result_arr.append(True)
-                elif(literal_operation == -1 and assignments[literal] == -1):
+                elif literal_operation == -1 and assignments[literal] == -1:
                     result_arr.append(False)
-                elif(literal_operation == 1 and assignments[literal] == 1):
+                elif literal_operation == 1 and assignments[literal] == 1:
                     result_arr.append(False)
-                elif(literal_operation == 1 and assignments[literal] == -1):
+                elif literal_operation == 1 and assignments[literal] == -1:
                     result_arr.append(True)
-            
-            results_arr.append(result_arr)       
+
+            results_arr.append(result_arr)
         for caluse_assignment in results_arr:
-             result = False
-             for literal_assignment in caluse_assignment:
-                 result = result or literal_assignment
-             if(result == False):
+            result = False
+            for literal_assignment in caluse_assignment:
+                result = result or literal_assignment
+            if result == False:
                 self.num_of_SAT_clauses_majority -= 1
-        
-        if(self.num_of_SAT_clauses_majority == self.M):
+
+        if self.num_of_SAT_clauses_majority == self.M:
             self.SAT_validation_majority = True
         else:
             self.SAT_validation_majority = False
-     
+
     def dontCarePrecentage(self):
-         counter = 0 
-         assignments = self.assignment.astype(int)
-         for literal_assignment in assignments:
-             if(literal_assignment == 0):
-                 counter = counter + 1
-         
-         return counter / self.N
- 
-        
-     
+        counter = 0
+        assignments = self.assignment.astype(int)
+        for literal_assignment in assignments:
+            if literal_assignment == 0:
+                counter = counter + 1
+
+        return counter / self.N
+
+
 class CNF_KSAT(randomKSAT):
-        
-    def __init__(self, max_iter, filePath, eps=1e-3, rand_assignment = False, verbose=False):
+
+    def __init__(
+        self, max_iter, filePath, eps=1e-3, rand_assignment=False, verbose=False
+    ):
         self.max_iter = max_iter
         self.filePath = filePath
         self.eps = eps
         self.verbose = verbose
-        
-        #Array of literals per clause for result validation
+
+        # Array of literals per clause for result validation
         self.literals_per_caluse = []
-        #Array that tells us if a literal is True or False in a clause
+        # Array that tells us if a literal is True or False in a clause
         self.literals_per_caluse_T_or_F = []
-        
+
         self.num_of_additional_clauses_for_anomaly = 0
-        
+
         self.graph = self.initialize_graph()
-        
+
         self.dgraph = self.graph.copy()
         self.WPstatus = None
         self.SPstatus = None
@@ -591,39 +1300,37 @@ class CNF_KSAT(randomKSAT):
         self.U = np.zeros((self.N, 2))
         # for survey propagation
         self.W = np.zeros((self.N, 3))
-        
-        
-        
-        if(self.rand_assignment == False):
+
+        if self.rand_assignment == False:
             self.assignment = np.zeros(self.N)
         else:
-            self.assignment = np.random.choice([0,1], size=self.N, p=[0.5, 0.5])
-        
-        if(self.verbose):
+            self.assignment = np.random.choice([0, 1], size=self.N, p=[0.5, 0.5])
+
+        if self.verbose:
             print(self.dgraph.edges())
-    
+
     def initialize_graph(self):
         G = nx.Graph()
-        file = open(self.filePath, 'r')
+        file = open(self.filePath, "r")
         Lines = file.readlines()
         count = 0
         for line in Lines:
             currLine = line.strip()
-            if currLine[0] == 'c':
+            if currLine[0] == "c":
                 continue
-            elif currLine[0] == 'p':
+            elif currLine[0] == "p":
                 lineArr = line.split()
                 self.N = int(lineArr[2])
                 self.M = int(lineArr[3])
                 G.add_nodes_from(np.arange(self.N + self.M))
             else:
                 lineArr = line.split()
-                arrInt = list(map(int,lineArr))
+                arrInt = list(map(int, lineArr))
                 if 0 in arrInt:
                     arrInt.remove(0)
-                B1 = list(map(abs,arrInt))
-                B = [item-1 for item in B1]
-                J=[]
+                B1 = list(map(abs, arrInt))
+                B = [item - 1 for item in B1]
+                J = []
                 for literal in arrInt:
                     if literal > 0:
                         J.append(-1)
@@ -633,14 +1340,14 @@ class CNF_KSAT(randomKSAT):
                 self.literals_per_caluse_T_or_F.append(J)
                 G.add_edges_from([(x, self.N + count) for x in B])
                 for i in range(len(B)):
-                        G[B[i]][self.N + count]['J'] = J[i]
-                        G[B[i]][self.N + count]['u'] = np.random.binomial(1, .5)
-                        G[B[i]][self.N + count]['h'] = 0
-                        G[B[i]][self.N + count]['delta'] = np.random.rand(1)
+                    G[B[i]][self.N + count]["J"] = J[i]
+                    G[B[i]][self.N + count]["u"] = np.random.binomial(1, 0.5)
+                    G[B[i]][self.N + count]["h"] = 0
+                    G[B[i]][self.N + count]["delta"] = np.random.rand(1)
                 count = count + 1
-                
+
         return G
-        
+
 
 class RandomPlantedSAT(randomKSAT):
 
@@ -651,25 +1358,24 @@ class RandomPlantedSAT(randomKSAT):
         self.max_iter = max_iter
         self.eps = eps
         self.verbose = verbose
-        
-        #Array of literals per clause for result validation
+
+        # Array of literals per clause for result validation
         self.literals_per_caluse = []
-        #Array that tells us if a literal is True or False in a clause
+        # Array that tells us if a literal is True or False in a clause
         self.literals_per_caluse_T_or_F = []
-        
+
         self.majority_vote_dictionary = self.initializeDictionary()
-        
+
         self.warnings_dictionary = self.initializeDictionary()
-        
-        #self.initial_literal_assingment = np.random.choice([0, 1], size=self.N, p=[.5, .5])
-        self.literal_assignment = np.random.choice([-1,1], size=self.N, p=[0.5, 0.5])
-        #print(self.literal_assignment)
+
+        # self.initial_literal_assingment = np.random.choice([0, 1], size=self.N, p=[.5, .5])
+        self.literal_assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+        # print(self.literal_assignment)
         self.num_of_additional_clauses_for_anomaly = 0
         self.graph = self.initialize_graph()
-        
-        
+
         self.majority_vote_result = np.array(self.MajorityVoteSolver())
-                
+
         self.dgraph = self.graph.copy()
         self.WPstatus = None
         self.SPstatus = None
@@ -681,69 +1387,68 @@ class RandomPlantedSAT(randomKSAT):
         self.U = np.zeros((self.N, 2))
         # for survey propagation
         self.W = np.zeros((self.N, 3))
-        
+
         self.SAT_validation = None
         self.iteration_counter = 0
         self.num_of_SAT_clauses = self.M
         self.num_of_SAT_clauses_majority = self.M
         self.SAT_validation_majority = None
-        
+
         self.majorityVoteValidation()
-        #print(self.num_of_SAT_clauses_majority)
-        
+        # print(self.num_of_SAT_clauses_majority)
+
         self.wp_contradiction_counter = 0
-        
-        
+
         self.literal_warning_flags = np.zeros(self.N)
-        
-        if(self.verbose):
-            print(self.dgraph.edges()) 
-    
+
+        if self.verbose:
+            print(self.dgraph.edges())
+
     def initialize_graph(self):
         G = nx.Graph()
-        G.add_nodes_from(np.arange(self.N + self.M))   
-        t=0
-        while(t<self.M):
+        G.add_nodes_from(np.arange(self.N + self.M))
+        t = 0
+        while t < self.M:
             B = np.unique(np.random.choice(self.N, self.K))
-            J = np.random.binomial(1, .5, size = np.shape(B))
-            J[J==0] = -1
-            if(self.approvedClause(B, J) == True):
-                #t=t+1
+            J = np.random.binomial(1, 0.5, size=np.shape(B))
+            J[J == 0] = -1
+            if self.approvedClause(B, J) == True:
+                # t=t+1
                 self.literals_per_caluse.append(B.tolist())
                 self.literals_per_caluse_T_or_F.append(J.tolist())
                 G.add_edges_from([(x, self.N + t) for x in B])
                 self.countLiteralInClause(B, J)
 
                 for i in range(len(B)):
-                    G[B[i]][self.N + t]['J'] = J[i]
-                    G[B[i]][self.N + t]['u'] = np.random.binomial(1, .5)
-                    G[B[i]][self.N + t]['h'] = 0
-                    G[B[i]][self.N + t]['delta'] = np.random.rand(1)
-                t+=1
-            #else:
-                #print("unSAT clause, fine new one")
-        
+                    G[B[i]][self.N + t]["J"] = J[i]
+                    G[B[i]][self.N + t]["u"] = np.random.binomial(1, 0.5)
+                    G[B[i]][self.N + t]["h"] = 0
+                    G[B[i]][self.N + t]["delta"] = np.random.rand(1)
+                t += 1
+            # else:
+            #     print("unSAT clause, fine new one")
+
         return G
-        
+
     def approvedClause(self, B, J):
-        clause_values=[]
+        clause_values = []
         clause_result = False
-        
-        for i in range(0,len(B)):
+
+        for i in range(0, len(B)):
             literal = B[i]
-            if(self.literal_assignment[literal] == 1 and J[i] == -1):
+            if self.literal_assignment[literal] == 1 and J[i] == -1:
                 clause_values.append(True)
-            elif(self.literal_assignment[literal] == 1 and J[i] == 1):
+            elif self.literal_assignment[literal] == 1 and J[i] == 1:
                 clause_values.append(False)
-            elif(self.literal_assignment[literal] == -1 and J[i] == -1):
+            elif self.literal_assignment[literal] == -1 and J[i] == -1:
                 clause_values.append(False)
-            elif(self.literal_assignment[literal] == -1 and J[i] == 1):
+            elif self.literal_assignment[literal] == -1 and J[i] == 1:
                 clause_values.append(True)
-        
+
         for value in clause_values:
             clause_result = clause_result or value
         return clause_result
-    
+
 
 class RandomPlantedSAT_coreAnomaly(randomKSAT):
     def __init__(self, N, M, K, max_iter, eps=1e-3, verbose=False):
@@ -753,25 +1458,24 @@ class RandomPlantedSAT_coreAnomaly(randomKSAT):
         self.max_iter = max_iter
         self.eps = eps
         self.verbose = verbose
-        
-        #Array of literals per clause for result validation
+
+        # Array of literals per clause for result validation
         self.literals_per_caluse = []
-        #Array that tells us if a literal is True or False in a clause
+        # Array that tells us if a literal is True or False in a clause
         self.literals_per_caluse_T_or_F = []
-        
+
         self.majority_vote_dictionary = self.initializeDictionary()
-        
+
         self.warnings_dictionary = self.initializeDictionary()
-        
-        #self.initial_literal_assingment = np.random.choice([0, 1], size=self.N, p=[.5, .5])
-        self.literal_assignment = np.random.choice([-1,1], size=self.N, p=[0.5, 0.5])
-        #print(self.literal_assignment)
+
+        # self.initial_literal_assingment = np.random.choice([0, 1], size=self.N, p=[.5, .5])
+        self.literal_assignment = np.random.choice([-1, 1], size=self.N, p=[0.5, 0.5])
+        # print(self.literal_assignment)
         self.num_of_additional_clauses_for_anomaly = 150
         self.graph = self.initialize_graph()
-        
-        
+
         self.majority_vote_result = np.array(self.MajorityVoteSolver())
-                
+
         self.dgraph = self.graph.copy()
         self.WPstatus = None
         self.SPstatus = None
@@ -783,138 +1487,154 @@ class RandomPlantedSAT_coreAnomaly(randomKSAT):
         self.U = np.zeros((self.N, 2))
         # for survey propagation
         self.W = np.zeros((self.N, 3))
-        
+
         self.SAT_validation = None
         self.iteration_counter = 0
         self.num_of_SAT_clauses = self.M
         self.num_of_SAT_clauses_majority = self.M
         self.SAT_validation_majority = None
-        
+
         self.majorityVoteValidation()
-        #print(self.num_of_SAT_clauses_majority)
-        
+        # print(self.num_of_SAT_clauses_majority)
+
         self.wp_contradiction_counter = 0
-        
-        
-        
+
         self.literal_warning_flags = np.zeros(self.N)
-        
-        if(self.verbose):
-            print(self.dgraph.edges()) 
-    
+
+        if self.verbose:
+            print(self.dgraph.edges())
+
     def initialize_graph(self):
         G = nx.Graph()
-        if(self.N >=50):
-            G.add_nodes_from(np.arange(self.N + self.M + self.num_of_additional_clauses_for_anomaly))
-        t=0
-        anomaly_nodes_counter = self.M 
-        while(t<self.M):
+        if self.N >= 50:
+            G.add_nodes_from(
+                np.arange(self.N + self.M + self.num_of_additional_clauses_for_anomaly)
+            )
+        t = 0
+        anomaly_nodes_counter = self.M
+        while t < self.M:
             B = np.unique(np.random.choice(self.N, self.K))
-            J = np.random.binomial(1, .5, size = np.shape(B))
-            J[J==0] = -1
-            if(self.approvedClause(B, J) == True):
-                #t=t+1
+            J = np.random.binomial(1, 0.5, size=np.shape(B))
+            J[J == 0] = -1
+            if self.approvedClause(B, J) == True:
+                # t=t+1
                 self.literals_per_caluse.append(B.tolist())
                 self.literals_per_caluse_T_or_F.append(J.tolist())
                 G.add_edges_from([(x, self.N + t) for x in B])
                 self.countLiteralInClause(B, J)
 
                 for i in range(len(B)):
-                    G[B[i]][self.N + t]['J'] = J[i]
-                    G[B[i]][self.N + t]['u'] = np.random.binomial(1, .5)
-                    G[B[i]][self.N + t]['h'] = 0
-                    G[B[i]][self.N + t]['delta'] = np.random.rand(1)
-                t+=1
+                    G[B[i]][self.N + t]["J"] = J[i]
+                    G[B[i]][self.N + t]["u"] = np.random.binomial(1, 0.5)
+                    G[B[i]][self.N + t]["h"] = 0
+                    G[B[i]][self.N + t]["delta"] = np.random.rand(1)
+                t += 1
 
-
-
-        if(self.N >= 50):
+        if self.N >= 50:
             support_literals_list = random.sample(list(range(self.N)), 50)
-            while(anomaly_nodes_counter < self.M + self.num_of_additional_clauses_for_anomaly):
+            while (
+                anomaly_nodes_counter
+                < self.M + self.num_of_additional_clauses_for_anomaly
+            ):
                 counter = 0
                 support_litral = random.sample(support_literals_list, 1)[0]
-                while(counter<3):
-                    B=[]
-                    J=[]
+                while counter < 3:
+                    B = []
+                    J = []
                     B.append(support_litral)
-                    J = np.random.binomial(1, .5, size = np.shape(B))
-                    J[J==0] = -1
-            
+                    J = np.random.binomial(1, 0.5, size=np.shape(B))
+                    J[J == 0] = -1
 
-                    while(self.approvedClause(B, J) != True):
-                        if(J[0] == -1):
+                    while self.approvedClause(B, J) != True:
+                        if J[0] == -1:
                             J[0] = 1
                         else:
                             J[0] = -1
                         unsupported_literals = random.sample(support_literals_list, 2)
-                        while(support_litral in unsupported_literals):
-                            unsupported_literals = random.sample(support_literals_list, 2)
-                        temp_J = np.random.binomial(1, .5, size = np.shape(unsupported_literals))
-                        temp_J[temp_J==0] = -1
-                        while(self.approvedClause(unsupported_literals, temp_J) != False):
-                            temp_J = np.random.binomial(1, .5, size = np.shape(unsupported_literals))
-                            temp_J[temp_J==0] = -1
-                            
+                        while support_litral in unsupported_literals:
+                            unsupported_literals = random.sample(
+                                support_literals_list, 2
+                            )
+                        temp_J = np.random.binomial(
+                            1, 0.5, size=np.shape(unsupported_literals)
+                        )
+                        temp_J[temp_J == 0] = -1
+                        while (
+                            self.approvedClause(unsupported_literals, temp_J) != False
+                        ):
+                            temp_J = np.random.binomial(
+                                1, 0.5, size=np.shape(unsupported_literals)
+                            )
+                            temp_J[temp_J == 0] = -1
+
                         B.extend(unsupported_literals)
                         J = np.append(J, temp_J)
                         self.literals_per_caluse.append(B)
                         self.literals_per_caluse_T_or_F.append(J.tolist())
-                        G.add_edges_from([(x, self.N + anomaly_nodes_counter) for x in B])
+                        G.add_edges_from(
+                            [(x, self.N + anomaly_nodes_counter) for x in B]
+                        )
                         self.countLiteralInClause(B, J)
-                        
-                        if(self.approvedClause(B, J) != True):
+
+                        if self.approvedClause(B, J) != True:
                             print("!!!!!!!!!!!!!!!!!!!")
                         for i in range(len(B)):
-                            G[B[i]][self.N + anomaly_nodes_counter]['J'] = J[i]
-                            G[B[i]][self.N + anomaly_nodes_counter]['u'] = np.random.binomial(1, .5)
-                            G[B[i]][self.N + anomaly_nodes_counter]['h'] = 0
-                            G[B[i]][self.N + anomaly_nodes_counter]['delta'] = np.random.rand(1)
-                        anomaly_nodes_counter +=1
-                        counter+=1
+                            G[B[i]][self.N + anomaly_nodes_counter]["J"] = J[i]
+                            G[B[i]][self.N + anomaly_nodes_counter]["u"] = (
+                                np.random.binomial(1, 0.5)
+                            )
+                            G[B[i]][self.N + anomaly_nodes_counter]["h"] = 0
+                            G[B[i]][self.N + anomaly_nodes_counter]["delta"] = (
+                                np.random.rand(1)
+                            )
+                        anomaly_nodes_counter += 1
+                        counter += 1
 
-                        #print(anomaly_nodes_counter)
-        #print(len(self.literals_per_caluse))
+                        # print(anomaly_nodes_counter)
+        # print(len(self.literals_per_caluse))
         return G
-        
+
     def approvedClause(self, B, J):
-        clause_values=[]
+        clause_values = []
         clause_result = False
-        
-        for i in range(0,len(B)):
+
+        for i in range(0, len(B)):
             literal = B[i]
-            if(self.literal_assignment[literal] == 1 and J[i] == -1):
+            if self.literal_assignment[literal] == 1 and J[i] == -1:
                 clause_values.append(True)
-            elif(self.literal_assignment[literal] == 1 and J[i] == 1):
+            elif self.literal_assignment[literal] == 1 and J[i] == 1:
                 clause_values.append(False)
-            elif(self.literal_assignment[literal] == -1 and J[i] == -1):
+            elif self.literal_assignment[literal] == -1 and J[i] == -1:
                 clause_values.append(False)
-            elif(self.literal_assignment[literal] == -1 and J[i] == 1):
+            elif self.literal_assignment[literal] == -1 and J[i] == 1:
                 clause_values.append(True)
-        
+
         for value in clause_values:
             clause_result = clause_result or value
         return clause_result
-    
+
+
 def calc_hamming(vec1, vec2):
     ham_dist = 0
-    
+
     for i in range(len(vec1)):
-        if(vec1[i] != vec2[i]):
+        if vec1[i] != vec2[i]:
             ham_dist = ham_dist + 1
     return ham_dist
+
 
 def absentLiteralCounter(lit_dict):
     counter = 0
     for key in lit_dict:
-        if(lit_dict[key] == 0):
-            counter +=1
+        if lit_dict[key] == 0:
+            counter += 1
     return counter
 
 
 def main():
-    #np.random.seed(12345)
-    #prop=randomKSAT(5,2,3,100)
-    '''
+    # np.random.seed(12345)
+    # prop=randomKSAT(5,2,3,100)
+    """
     counter = 0
     for i in range(1000):
         prop = RandomPlantedSAT(500,500*5,3,700)
@@ -922,43 +1642,44 @@ def main():
         if(num_of_absent_literals > 0):
             counter+=1
         del prop
-    print(counter)'''
-    
+    print(counter)"""
 
-    prop2 = RandomPlantedSAT(50,50*10,3,100) #randomKSAT(2,20,3,100) #RandomPlantedSAT(3,300,3,1000) 
-    #prop2 = copy.deepcopy(prop1)
-    #prop3 = copy.deepcopy(prop1)
-    
+    prop2 = RandomPlantedSAT(
+        50, 50 * 10, 3, 100
+    )  # randomKSAT(2,20,3,100) #RandomPlantedSAT(3,300,3,1000)
+    # prop2 = copy.deepcopy(prop1)
+    # prop3 = copy.deepcopy(prop1)
+
     start = time.process_time()
-    #prop2.belief_prop()#warning_id()#survey_id_sp()
-    #prop2.surveyID()
-    #prop2.belief_prop()
+    # prop2.belief_prop()#warning_id()#survey_id_sp()
+    # prop2.surveyID()
+    # prop2.belief_prop()
     prop2.warning_id()
     print(prop2.iteration_counter)
     lit_dict, result_val = prop2.validateFinalAssignmemt()
     print(prop2.SAT_validation)
-    
-    #print("BP Status = ", prop2.BPstatus)
-    #print("Satisfiability = ", prop2.sat)
-    #print(prop2.check_truth())
-    #print(prop2.validateFinalAssignmemt()[0])
+
+    # print("BP Status = ", prop2.BPstatus)
+    # print("Satisfiability = ", prop2.sat)
+    # print(prop2.check_truth())
+    # print(prop2.validateFinalAssignmemt()[0])
     lit_dict, result_val = prop2.validateFinalAssignmemt()
     end = time.process_time()
-    #print(prop2.SAT_validation)
-    print("Total time of warning propagation {} seconds".format((end-start)))
-    #print(prop2.assignment.astype(int))
-    #print(prop2.literal_assignment)
-    #print(calc_hamming(prop2.literal_assignment, prop2.assignment.astype(int)))
-    #print(prop2.assignment.astype(int))
+    # print(prop2.SAT_validation)
+    print("Total time of warning propagation {} seconds".format((end - start)))
+    # print(prop2.assignment.astype(int))
+    # print(prop2.literal_assignment)
+    # print(calc_hamming(prop2.literal_assignment, prop2.assignment.astype(int)))
+    # print(prop2.assignment.astype(int))
 
     print("#######################")
-    prop3 = RandomPlantedSAT_coreAnomaly(50,50*10,3,100)
+    prop3 = RandomPlantedSAT_coreAnomaly(50, 50 * 10, 3, 100)
     prop3.belief_prop()
     print(prop3.iteration_counter)
     lit_dict, result_val = prop3.validateFinalAssignmemt()
     print(prop3.SAT_validation)
-    
-    '''
+
+    """
     print(prop1.majority_vote_dictionary)
     print("\n\n")
     start = time.process_time()
@@ -1019,15 +1740,14 @@ def main():
     #print(prop1.num_of_SAT_clauses_majority)
     #print(prop1.SAT_validation_majority)
 
-    print(calc_hamming(prop1.literal_assignment, prop1.majority_vote_result.astype(int)))'''
+    print(calc_hamming(prop1.literal_assignment, prop1.majority_vote_result.astype(int)))"""
 
-                  
-    
+
 if __name__ == "__main__":
     main()
 
 
-'''
+"""
     def survey_id_sp(self):
         max_it = 0
         dont_care_ratio = self.dontCarePrecentage()
@@ -1073,4 +1793,4 @@ if __name__ == "__main__":
                 return
             self.SPstatus = 'UNCONVERGED'
             
-'''
+"""

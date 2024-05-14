@@ -1,0 +1,6 @@
+,N and C,SAT Percentage,Average Percentage of SAT Clauses,Average Percent Hamming distance,Average Runtime,Average Percent Dont Care,Average Number of Iterations,Average number of absent literals,SAT Percentage (MV),Average Percentage of SAT Clauses(MV),Average Percent Hamming distance (MV),Average Number of Contradictions (WP)
+0,"(2, 1)",30.0,37.5,85.0,3.4116111111111107e-06,0.15,7.3,0.45,85.0,92.5,100.0,0.0
+1,"(2, 2)",55.00000000000001,80.0,92.5,5.169083333333339e-06,0.075,6.85,0.1,35.0,81.25,100.0,0.0
+2,"(2, 15)",0.0,70.5,100.0,4.444319444444445e-05,0.0,3.0,0.0,0.0,72.66666666666667,100.0,0.0
+3,"(2, 20)",0.0,68.375,100.0,6.73792361111111e-05,0.0,2.9,0.0,0.0,72.5,100.0,0.0
+4,"(2, 25)",0.0,70.5,100.0,0.00011775081944444444,0.0,3.0,0.0,0.0,72.7,100.0,0.0
